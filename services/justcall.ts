@@ -11,69 +11,88 @@ export interface TranscriptData {
   recording_url: string;
 }
 
-// --- STRATEGY 1: Local Vite Proxy (Preferred) ---
-// This works if vite.config.ts is loaded correctly (requires server restart).
+// --- CONFIGURATION ---
+const BASE_PATH = "/justcall-api/v1/calls";
+const DIRECT_API = "https://api.justcall.io/v1/calls";
+
+/**
+ * STRATEGY 1: Local Vite Proxy (Best)
+ * Uses HTTP Headers. Secure. Requires Vite Dev Server.
+ */
 const getLocalUrl = (queryParams: string) => {
-  const basePath = "/justcall-api/v1/calls";
   if (typeof window !== 'undefined') {
-    // FIX: Using window.location.origin prevents the "Invalid URL" error
-    return new URL(`${basePath}${queryParams}`, window.location.origin).toString();
+    return new URL(`${BASE_PATH}${queryParams}`, window.location.origin).toString();
   }
-  return `${basePath}${queryParams}`;
+  return `${BASE_PATH}${queryParams}`;
 };
 
-// --- STRATEGY 2: Header-Compatible Public Proxy (Fallback) ---
-// Used automatically if the local proxy fails (404).
-// We use corsproxy.io because it FORWARDS the Authorization headers securely.
-const getPublicUrl = (queryParams: string) => {
-    // We construct the direct JustCall URL
-    const target = `https://api.justcall.io/v1/calls${queryParams}`;
-    // And wrap it in the proxy
-    return `https://corsproxy.io/?${encodeURIComponent(target)}`;
+/**
+ * STRATEGY 2: Public Proxies (Fallback)
+ * Uses URL Query Params for Auth (Bypasses Header stripping issues).
+ * We iterate through these if Local Proxy fails.
+ */
+const getFallbackUrls = (targetUrlWithAuth: string) => {
+  return [
+    // CorsProxy.io - Fast, reliable
+    `https://corsproxy.io/?${encodeURIComponent(targetUrlWithAuth)}`,
+    // AllOrigins - Good backup, handles simple requests well
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrlWithAuth)}`
+  ];
 };
 
 /**
  * Validates the API credentials.
- * Automatically switches to the Public Proxy if the Local Proxy isn't running.
+ * Tries Local Proxy first, then cycles through Public Proxies.
  */
 export const testConnection = async (apiKey: string, apiSecret: string): Promise<boolean> => {
   const cleanKey = apiKey.trim();
   const cleanSecret = apiSecret.trim();
-  const authHeaders = {
-    'Authorization': `${cleanKey}:${cleanSecret}`,
-    'Accept': 'application/json'
-  };
   
+  // 1. Try Local Proxy (Standard Header Auth)
   try {
-    // Attempt 1: Try Local Proxy
+    const authHeaders = {
+      'Authorization': `${cleanKey}:${cleanSecret}`,
+      'Accept': 'application/json'
+    };
     await axios.get(getLocalUrl('?page=1&per_page=1'), { headers: authHeaders });
     return true;
   } catch (error: any) {
-    // If Local Proxy is missing (404) or Network Error, switch to Fallback
+    // Only fallback if it's a "Network Error" (Proxy blocked) or 404 (Proxy missing)
     if (error.response?.status === 404 || error.message === 'Network Error' || error.code === 'ERR_NETWORK') {
-       console.warn("Local proxy unavailable (404), switching to fallback proxy...");
-       try {
-         // Fallback: Use Public Proxy with Headers
-         await axios.get(getPublicUrl('?page=1&per_page=1'), { headers: authHeaders });
-         return true;
-       } catch (fallbackError: any) {
-          console.error("Fallback failed:", fallbackError);
-          throw new Error("Connection failed. Please check your API Key and Secret.");
-       }
+       console.warn("Local proxy unavailable, attempting fallbacks...");
+       return await testFallbacks(cleanKey, cleanSecret);
     }
     
-    // Handle specific Auth errors
+    // If it's a legitimate 403/401 from the Local Proxy, fail immediately (invalid keys)
     if (error.response?.status === 403 || error.response?.status === 401) {
         throw new Error(`Invalid Credentials (Status ${error.response.status}). Please check your API Key/Secret.`);
     }
-    
     throw error;
   }
 };
 
+const testFallbacks = async (apiKey: string, apiSecret: string): Promise<boolean> => {
+  // Construct URL with Auth embedded (Robust for proxies)
+  const queryAuth = `?api_key=${encodeURIComponent(apiKey)}&api_secret=${encodeURIComponent(apiSecret)}&page=1&per_page=1&_t=${Date.now()}`;
+  const targetUrl = `${DIRECT_API}${queryAuth}`;
+  const proxies = getFallbackUrls(targetUrl);
+
+  for (const proxyUrl of proxies) {
+    try {
+      // No headers needed for this method, it's a simple GET
+      await axios.get(proxyUrl);
+      return true; // Success!
+    } catch (e) {
+      console.warn(`Proxy failed: ${proxyUrl}`, e);
+      continue; // Try next proxy
+    }
+  }
+  throw new Error("Connection failed. Could not reach JustCall via any proxy. Please check your internet connection.");
+};
+
 /**
  * Fetches calls from JustCall API.
- * Uses the appropriate proxy strategy based on availability.
+ * Automatically selects the working connection method.
  */
 export const fetchJustCallTranscripts = async (
   config: { apiKey: string; apiSecret: string; startDate: string; endDate: string },
@@ -82,45 +101,63 @@ export const fetchJustCallTranscripts = async (
   const allTranscripts: TranscriptData[] = [];
   let page = 1;
   let hasMore = true;
-  let useFallback = false;
   
   const cleanKey = config.apiKey.trim();
   const cleanSecret = config.apiSecret.trim();
-  const authHeaders = {
-    'Authorization': `${cleanKey}:${cleanSecret}`,
-    'Accept': 'application/json'
-  };
-
-  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
   const startUnix = Math.floor(new Date(config.startDate).getTime() / 1000);
   const endUnix = Math.floor(new Date(config.endDate).getTime() / 1000) + 86399;
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-  // Step 1: Detect which Proxy Strategy to use
+  // Step 1: Determine Strategy
+  let activeStrategy: 'LOCAL' | 'PROXY_1' | 'PROXY_2' = 'LOCAL';
+  
+  // Quick check to see what works
   try {
-      await axios.get(getLocalUrl('?page=1&per_page=1'), { headers: authHeaders });
-  } catch (err: any) {
-      if (err.response?.status === 404 || err.message === 'Network Error' || err.code === 'ERR_NETWORK') {
-          useFallback = true;
-      }
+     await axios.get(getLocalUrl('?page=1&per_page=1'), { 
+        headers: { 'Authorization': `${cleanKey}:${cleanSecret}` } 
+     });
+     activeStrategy = 'LOCAL';
+  } catch (e: any) {
+     // If local fails, try Proxy 1
+     const testUrl = `${DIRECT_API}?api_key=${cleanKey}&api_secret=${cleanSecret}&page=1&per_page=1`;
+     const proxies = getFallbackUrls(testUrl);
+     try {
+        await axios.get(proxies[0]);
+        activeStrategy = 'PROXY_1';
+     } catch {
+        activeStrategy = 'PROXY_2';
+     }
   }
 
   // Step 2: Fetch Loop
   try {
     while (hasMore) {
-      // FIX: Added &fetch_transcription=true to ensure text content is returned
-      const queryParams = `?from=${startUnix}&to=${endUnix}&page=${page}&per_page=50&fetch_transcription=true`;
-      let calls: any[] = [];
+      // Base Params
+      const baseParams = `&from=${startUnix}&to=${endUnix}&page=${page}&per_page=50&fetch_transcription=true`;
+      
       let response;
-
-      // Select URL based on strategy
-      if (!useFallback) {
-          response = await axios.get(getLocalUrl(queryParams), { headers: authHeaders });
+      
+      if (activeStrategy === 'LOCAL') {
+         response = await axios.get(getLocalUrl(`?${baseParams}`), {
+            headers: { 'Authorization': `${cleanKey}:${cleanSecret}`, 'Accept': 'application/json' }
+         });
       } else {
-          response = await axios.get(getPublicUrl(queryParams), { headers: authHeaders });
+         // Fallback Strategy: Embed Auth in URL
+         const authParams = `?api_key=${encodeURIComponent(cleanKey)}&api_secret=${encodeURIComponent(cleanSecret)}`;
+         const fullTarget = `${DIRECT_API}${authParams}${baseParams}`;
+         
+         const proxyUrl = activeStrategy === 'PROXY_1' 
+            ? getFallbackUrls(fullTarget)[0] 
+            : getFallbackUrls(fullTarget)[1];
+            
+         response = await axios.get(proxyUrl);
       }
 
       const data = response.data;
-      calls = Array.isArray(data.data) ? data.data : (Array.isArray(data) ? data : []);
+      
+      // Handle different proxy response structures (sometimes wrapped in contents)
+      const validData = data.data || (data.contents ? JSON.parse(data.contents).data : data);
+      const calls = Array.isArray(validData) ? validData : [];
 
       if (calls.length === 0) {
         hasMore = false;
@@ -128,7 +165,6 @@ export const fetchJustCallTranscripts = async (
       }
 
       for (const call of calls) {
-        // JustCall stores transcripts in various fields depending on the integration type
         const text = call.iq_transcript || 
                      call.call_transcription || 
                      call.transcription || 
@@ -159,7 +195,7 @@ export const fetchJustCallTranscripts = async (
     }
   } catch (error: any) {
     console.error("Fetch Error:", error);
-    throw new Error("Failed to retrieve transcripts. Please check connection.");
+    throw new Error("Failed to retrieve transcripts. Network blocked or Rate Limit reached.");
   }
 
   return allTranscripts;
