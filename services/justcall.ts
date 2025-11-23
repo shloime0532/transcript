@@ -12,10 +12,14 @@ export interface TranscriptData {
   recording_url: string;
 }
 
-// We rotate through these proxies to find one that works
+// PROXY STRATEGY:
+// 1. corsproxy.io: Usually fastest, supports headers.
+// 2. allorigins.win: Very reliable, but often strips headers (requires URL auth).
+// 3. thingproxy: Backup.
 const PROXY_SERVICES = [
     (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`
+    (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    (url: string) => `https://thingproxy.freeboard.io/fetch/${url}`
 ];
 
 const BASE_URL = "https://api.justcall.io/v1/calls";
@@ -29,16 +33,13 @@ async function fetchWithFailover(targetUrl: string, headers: any = {}) {
     for (const createProxyUrl of PROXY_SERVICES) {
         try {
             const proxyUrl = createProxyUrl(targetUrl);
-            // console.log("Trying proxy:", proxyUrl); 
+            // 15s timeout for proxy responses
             const response = await axios.get(proxyUrl, { headers, timeout: 15000 });
             return response;
         } catch (err: any) {
-            // console.warn("Proxy failed, trying next...", err.message);
             lastError = err;
-            // If it's a 401/403 from the actual API (not the proxy), stop trying other proxies
-            if (err.response && (err.response.status === 401 || err.response.status === 403)) {
-                throw err;
-            }
+            // Continue to next proxy on error
+            // console.warn(`Proxy ${createProxyUrl('')} failed:`, err.message);
         }
     }
     throw lastError;
@@ -49,23 +50,39 @@ async function fetchWithFailover(targetUrl: string, headers: any = {}) {
  */
 export const testConnection = async (apiKey: string, apiSecret: string): Promise<boolean> => {
   try {
-    // CRITICAL FIX: Encode key/secret individually so symbols don't break the URL query params
-    const safeKey = encodeURIComponent(apiKey);
-    const safeSecret = encodeURIComponent(apiSecret);
+    // AUTH STRATEGY: 
+    // Send credentials in BOTH Headers (Standard) and URL (Backup for proxies that strip headers).
+    // JustCall V1 historically accepts URL params, which is safer for proxies.
     
-    const targetUrl = `${BASE_URL}?page=1&per_page=1&api_key=${safeKey}&api_secret=${safeSecret}`;
+    const encodedKey = encodeURIComponent(apiKey);
+    const encodedSecret = encodeURIComponent(apiSecret);
+
+    // Construct URL with credentials
+    const targetUrl = `${BASE_URL}?page=1&per_page=1&api_key=${encodedKey}&api_secret=${encodedSecret}`;
     
-    await fetchWithFailover(targetUrl, { 'Accept': 'application/json' });
+    const headers = {
+        'Authorization': `${apiKey}:${apiSecret}`,
+        'Accept': 'application/json'
+    };
+    
+    await fetchWithFailover(targetUrl, headers);
     return true;
   } catch (error: any) {
     console.error("Connection Test Failed:", error);
     
+    if (error.message === 'Network Error') {
+        throw new Error('Network Error: Proxies blocked. Please disable AdBlockers/Privacy extensions for this page.');
+    }
+
     if (error.response) {
-        // If we get a response, the server rejected us (e.g. 403), so we propagate that specific error
-        throw new Error(`Server rejected credentials (Status ${error.response.status})`);
+        const status = error.response.status;
+        if (status === 403) {
+             throw new Error(`Access Denied (403). Check API Keys or IP Whitelist.`);
+        }
+        throw new Error(`Server Error: ${status}`);
     }
     
-    return false;
+    throw error;
   }
 };
 
@@ -80,21 +97,26 @@ export const fetchJustCallTranscripts = async (
   let page = 1;
   let hasMore = true;
   
-  // Helper to delay execution (rate limiting)
   const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+  // Unix Timestamps
+  const startUnix = Math.floor(new Date(config.startDate).getTime() / 1000);
+  const endUnix = Math.floor(new Date(config.endDate).getTime() / 1000) + 86399;
+
+  const encodedKey = encodeURIComponent(config.apiKey);
+  const encodedSecret = encodeURIComponent(config.apiSecret);
+
+  const headers = {
+      'Authorization': `${config.apiKey}:${config.apiSecret}`,
+      'Accept': 'application/json'
+  };
+
   try {
-    // Encode credentials once
-    const safeKey = encodeURIComponent(config.apiKey);
-    const safeSecret = encodeURIComponent(config.apiSecret);
-
     while (hasMore) {
-      // Construct authenticated URL
-      const targetUrl = `${BASE_URL}?from=${config.startDate}&to=${config.endDate}&page=${page}&per_page=50&api_key=${safeKey}&api_secret=${safeSecret}`;
+      // Include credentials in URL for proxy reliability
+      const targetUrl = `${BASE_URL}?from=${startUnix}&to=${endUnix}&page=${page}&per_page=50&api_key=${encodedKey}&api_secret=${encodedSecret}`;
 
-      const response = await fetchWithFailover(targetUrl, {
-        'Accept': 'application/json'
-      });
+      const response = await fetchWithFailover(targetUrl, headers);
 
       const data = response.data;
 
@@ -114,7 +136,6 @@ export const fetchJustCallTranscripts = async (
 
       // Extract relevant fields
       for (const call of calls) {
-        // Aggressively hunt for the transcript in known fields
         const text = call.iq_transcript || 
                      call.call_transcription || 
                      call.transcription || 
@@ -141,7 +162,7 @@ export const fetchJustCallTranscripts = async (
         hasMore = false;
       } else {
         page++;
-        await sleep(1000); // 1s delay to be safe with rate limits
+        await sleep(1000); // 1s delay
       }
     }
   } catch (error: any) {
@@ -149,12 +170,14 @@ export const fetchJustCallTranscripts = async (
     
     let errorMessage = "Failed to connect to JustCall.";
     
-    if (error.response) {
+    if (error.message === 'Network Error') {
+        errorMessage = "Network Error: Proxies were blocked. Please check your internet connection or disable ad-blockers.";
+    } else if (error.response) {
         const status = error.response.status;
         const apiMsg = error.response.data?.message || JSON.stringify(error.response.data);
         
         if (status === 403 || status === 401) {
-            errorMessage = `Authentication Failed (${status}). The server rejected the keys. Please Reset Connection and check your API Key/Secret.`;
+            errorMessage = `Authentication Failed (${status}). Please check API Credentials.`;
         } else if (status === 429) {
             errorMessage = "Rate Limit Exceeded. Please try a smaller date range.";
         } else {

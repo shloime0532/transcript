@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { Settings, Key, Calendar, ArrowRight, Loader2, CheckCircle, Shield, RefreshCw, Lock, AlertCircle } from 'lucide-react';
+import { Settings, Key, Calendar, ArrowRight, Loader2, CheckCircle, Shield, RefreshCw, Lock, AlertCircle, HelpCircle } from 'lucide-react';
 import { testConnection } from '../services/justcall';
 
 interface ExtractorBuilderProps {
@@ -124,9 +124,21 @@ export const ExtractorBuilder: React.FC<ExtractorBuilderProps> = ({ onBuild, isB
           </div>
 
           {configError && (
-              <div className="p-3 bg-red-900/30 border border-red-800/50 rounded text-xs text-red-300 flex items-start">
-                  <AlertCircle className="w-4 h-4 mr-2 flex-shrink-0 mt-0.5" />
-                  <span>{configError}</span>
+              <div className="p-3 bg-red-900/30 border border-red-800/50 rounded flex flex-col gap-1">
+                  <div className="flex items-start text-xs text-red-300">
+                    <AlertCircle className="w-4 h-4 mr-2 flex-shrink-0 mt-0.5" />
+                    <span className="font-bold">{configError}</span>
+                  </div>
+                  {configError.includes('Network Error') && (
+                      <div className="ml-6 text-[10px] text-red-400/80">
+                        Tip: "Network Error" often means a browser extension (AdBlocker, Privacy Badger) is blocking the connection to the proxy. Try disabling them for this page.
+                      </div>
+                  )}
+                  {configError.includes('403') && (
+                      <div className="ml-6 text-[10px] text-red-400/80">
+                        Tip: If keys are correct, check if "IP Access Control" is enabled in JustCall settings.
+                      </div>
+                  )}
               </div>
           )}
 
