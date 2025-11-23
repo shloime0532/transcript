@@ -1,0 +1,5 @@
+{
+  "name": "JustCall Backend Generator",
+  "description": "Generate a custom Node.js backend to extract historical JustCall transcripts and AI data.",
+  "requestFramePermissions": []
+}
