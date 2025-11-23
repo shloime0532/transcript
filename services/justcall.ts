@@ -12,82 +12,50 @@ export interface TranscriptData {
   recording_url: string;
 }
 
-// PROXY STRATEGY:
-// 1. corsproxy.io: Usually fastest, supports headers.
-// 2. allorigins.win: Very reliable, but often strips headers (requires URL auth).
-// 3. thingproxy: Backup.
-const PROXY_SERVICES = [
-    (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-    (url: string) => `https://thingproxy.freeboard.io/fetch/${url}`
-];
-
-const BASE_URL = "https://api.justcall.io/v1/calls";
-
-/**
- * Helper to try multiple proxies
- */
-async function fetchWithFailover(targetUrl: string, headers: any = {}) {
-    let lastError;
-    
-    for (const createProxyUrl of PROXY_SERVICES) {
-        try {
-            const proxyUrl = createProxyUrl(targetUrl);
-            // 15s timeout for proxy responses
-            const response = await axios.get(proxyUrl, { headers, timeout: 15000 });
-            return response;
-        } catch (err: any) {
-            lastError = err;
-            // Continue to next proxy on error
-            // console.warn(`Proxy ${createProxyUrl('')} failed:`, err.message);
-        }
-    }
-    throw lastError;
-}
+// USE LOCAL PROXY PATH (Defined in vite.config.ts)
+// This forwards requests from http://localhost:PORT/justcall-api -> https://api.justcall.io
+// This bypasses CORS and allows us to send secure Headers.
+const BASE_URL = "/justcall-api/v1/calls";
 
 /**
  * Validates the API credentials by fetching a single record.
+ * Uses the Authorization header for security.
  */
 export const testConnection = async (apiKey: string, apiSecret: string): Promise<boolean> => {
   try {
-    // AUTH STRATEGY: 
-    // Send credentials in BOTH Headers (Standard) and URL (Backup for proxies that strip headers).
-    // JustCall V1 historically accepts URL params, which is safer for proxies.
-    
-    const encodedKey = encodeURIComponent(apiKey);
-    const encodedSecret = encodeURIComponent(apiSecret);
+    // Clean inputs
+    const cleanKey = apiKey.trim();
+    const cleanSecret = apiSecret.trim();
 
-    // Construct URL with credentials
-    const targetUrl = `${BASE_URL}?page=1&per_page=1&api_key=${encodedKey}&api_secret=${encodedSecret}`;
-    
-    const headers = {
-        'Authorization': `${apiKey}:${apiSecret}`,
+    // We request 1 item just to check if keys work.
+    // We use the Standard Authentication method: Authorization Header.
+    await axios.get(`${BASE_URL}?page=1&per_page=1`, {
+      headers: {
+        'Authorization': `${cleanKey}:${cleanSecret}`,
         'Accept': 'application/json'
-    };
-    
-    await fetchWithFailover(targetUrl, headers);
+      }
+    });
     return true;
   } catch (error: any) {
     console.error("Connection Test Failed:", error);
     
-    if (error.message === 'Network Error') {
-        throw new Error('Network Error: Proxies blocked. Please disable AdBlockers/Privacy extensions for this page.');
-    }
-
     if (error.response) {
         const status = error.response.status;
-        if (status === 403) {
-             throw new Error(`Access Denied (403). Check API Keys or IP Whitelist.`);
+        if (status === 404) {
+            throw new Error("Proxy Error (404): Please restart your dev server to apply vite.config.ts changes.");
         }
-        throw new Error(`Server Error: ${status}`);
+        if (status === 403 || status === 401) {
+            throw new Error(`Invalid Credentials (Status ${status}). Please check your API Key/Secret.`);
+        }
+        throw new Error(`Server Error (${status}): ${error.response.data?.message || 'Unknown'}`);
     }
     
-    throw error;
+    throw new Error(error.message || "Connection failed. Ensure local dev server is running.");
   }
 };
 
 /**
- * Fetches calls from JustCall API, handling pagination and extracting transcripts.
+ * Fetches calls from JustCall API using the local proxy.
  */
 export const fetchJustCallTranscripts = async (
   config: { apiKey: string; apiSecret: string; startDate: string; endDate: string },
@@ -97,36 +65,34 @@ export const fetchJustCallTranscripts = async (
   let page = 1;
   let hasMore = true;
   
+  // Helper to delay execution (rate limiting)
   const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-  // Unix Timestamps
+  // Unix Timestamps (Seconds)
   const startUnix = Math.floor(new Date(config.startDate).getTime() / 1000);
   const endUnix = Math.floor(new Date(config.endDate).getTime() / 1000) + 86399;
 
-  const encodedKey = encodeURIComponent(config.apiKey);
-  const encodedSecret = encodeURIComponent(config.apiSecret);
-
-  const headers = {
-      'Authorization': `${config.apiKey}:${config.apiSecret}`,
-      'Accept': 'application/json'
-  };
-
   try {
     while (hasMore) {
-      // Include credentials in URL for proxy reliability
-      const targetUrl = `${BASE_URL}?from=${startUnix}&to=${endUnix}&page=${page}&per_page=50&api_key=${encodedKey}&api_secret=${encodedSecret}`;
+      // JustCall V1 uses Unix timestamps for 'from' and 'to' usually, but accepts YYYY-MM-DD in some endpoints.
+      // Using Unix timestamps is safer.
+      const targetUrl = `${BASE_URL}?from=${startUnix}&to=${endUnix}&page=${page}&per_page=50`;
 
-      const response = await fetchWithFailover(targetUrl, headers);
+      const response = await axios.get(targetUrl, {
+        headers: {
+            'Authorization': `${config.apiKey}:${config.apiSecret}`,
+            'Accept': 'application/json'
+        }
+      });
 
       const data = response.data;
 
-      // Validate response structure
+      // Robust data checking
       if (!data || (!Array.isArray(data.data) && !Array.isArray(data))) {
         hasMore = false;
         break;
       }
 
-      // Handle both data.data (paginated wrapper) and raw array responses
       const calls = Array.isArray(data.data) ? data.data : (Array.isArray(data) ? data : []);
       
       if (calls.length === 0) {
@@ -134,8 +100,8 @@ export const fetchJustCallTranscripts = async (
         break;
       }
 
-      // Extract relevant fields
       for (const call of calls) {
+        // JustCall stores transcripts in various fields depending on the integration type (AI, IQ, Standard)
         const text = call.iq_transcript || 
                      call.call_transcription || 
                      call.transcription || 
@@ -157,12 +123,11 @@ export const fetchJustCallTranscripts = async (
 
       onProgress(allTranscripts.length);
       
-      // Pagination check
       if (calls.length < 50) {
         hasMore = false;
       } else {
         page++;
-        await sleep(1000); // 1s delay
+        await sleep(500); // 500ms delay to be safe with rate limits
       }
     }
   } catch (error: any) {
@@ -170,20 +135,18 @@ export const fetchJustCallTranscripts = async (
     
     let errorMessage = "Failed to connect to JustCall.";
     
-    if (error.message === 'Network Error') {
-        errorMessage = "Network Error: Proxies were blocked. Please check your internet connection or disable ad-blockers.";
-    } else if (error.response) {
+    if (error.response) {
         const status = error.response.status;
-        const apiMsg = error.response.data?.message || JSON.stringify(error.response.data);
-        
         if (status === 403 || status === 401) {
-            errorMessage = `Authentication Failed (${status}). Please check API Credentials.`;
+            errorMessage = `Authentication Failed (${status}). Please check your API Key/Secret.`;
         } else if (status === 429) {
             errorMessage = "Rate Limit Exceeded. Please try a smaller date range.";
+        } else if (status === 404) {
+             errorMessage = "Proxy Error: Endpoint not found. Ensure vite.config.ts is loaded.";
         } else {
-            errorMessage = `API Error (${status}): ${apiMsg}`;
+            errorMessage = `API Error (${status}): ${error.response.data?.message || 'Unknown error'}`;
         }
-    } else if (error.message) {
+    } else {
         errorMessage = error.message;
     }
     throw new Error(errorMessage);

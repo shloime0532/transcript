@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { Settings, Key, Calendar, ArrowRight, Loader2, CheckCircle, Shield, RefreshCw, Lock, AlertCircle, HelpCircle } from 'lucide-react';
+import { Settings, Key, Calendar, ArrowRight, Loader2, CheckCircle, Shield, RefreshCw, Lock, AlertCircle } from 'lucide-react';
 import { testConnection } from '../services/justcall';
 
 interface ExtractorBuilderProps {
@@ -46,7 +46,7 @@ export const ExtractorBuilder: React.FC<ExtractorBuilderProps> = ({ onBuild, isB
 
     try {
         await testConnection(cleanKey, cleanSecret);
-        // If we get here, it succeeded (testConnection throws if it fails)
+        // If we get here, it succeeded
         localStorage.setItem('jc_api_key', cleanKey);
         localStorage.setItem('jc_api_secret', cleanSecret);
         setApiKey(cleanKey); 
@@ -54,7 +54,7 @@ export const ExtractorBuilder: React.FC<ExtractorBuilderProps> = ({ onBuild, isB
         setIsConfigured(true);
     } catch (err: any) {
         console.error(err);
-        setConfigError(err.message || "Connection failed. Please check your keys.");
+        setConfigError(err.message || "Connection failed.");
     } finally {
         setIsTesting(false);
     }
@@ -62,7 +62,7 @@ export const ExtractorBuilder: React.FC<ExtractorBuilderProps> = ({ onBuild, isB
 
   const handleRunExtraction = (e: React.FormEvent) => {
     e.preventDefault();
-    onBuild({ apiKey, apiSecret, startDate, endDate });
+    onBuild({ apiKey: apiKey.trim(), apiSecret: apiSecret.trim(), startDate, endDate });
   };
 
   const resetConfig = () => {
@@ -86,7 +86,7 @@ export const ExtractorBuilder: React.FC<ExtractorBuilderProps> = ({ onBuild, isB
             Backend Configuration
           </h3>
           <p className="text-xs text-slate-400 mt-1">
-            Enter your JustCall API credentials. We will verify them before saving.
+            Enter your JustCall API credentials to establish a secure connection via local proxy.
           </p>
         </div>
         
@@ -129,16 +129,6 @@ export const ExtractorBuilder: React.FC<ExtractorBuilderProps> = ({ onBuild, isB
                     <AlertCircle className="w-4 h-4 mr-2 flex-shrink-0 mt-0.5" />
                     <span className="font-bold">{configError}</span>
                   </div>
-                  {configError.includes('Network Error') && (
-                      <div className="ml-6 text-[10px] text-red-400/80">
-                        Tip: "Network Error" often means a browser extension (AdBlocker, Privacy Badger) is blocking the connection to the proxy. Try disabling them for this page.
-                      </div>
-                  )}
-                  {configError.includes('403') && (
-                      <div className="ml-6 text-[10px] text-red-400/80">
-                        Tip: If keys are correct, check if "IP Access Control" is enabled in JustCall settings.
-                      </div>
-                  )}
               </div>
           )}
 
@@ -154,7 +144,7 @@ export const ExtractorBuilder: React.FC<ExtractorBuilderProps> = ({ onBuild, isB
             {isTesting ? (
                 <>
                     <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                    Verifying Credentials...
+                    Testing Connection...
                 </>
             ) : (
                 "Save & Connect"
@@ -165,7 +155,7 @@ export const ExtractorBuilder: React.FC<ExtractorBuilderProps> = ({ onBuild, isB
     );
   }
 
-  // VIEW 2: The Tool (Keys are hidden "in the back")
+  // VIEW 2: The Tool
   return (
     <div className="bg-slate-800 rounded-xl border border-slate-700 shadow-xl overflow-hidden">
       <div className="p-5 border-b border-slate-700 bg-slate-800/50 flex justify-between items-center">
@@ -178,7 +168,7 @@ export const ExtractorBuilder: React.FC<ExtractorBuilderProps> = ({ onBuild, isB
         <div className="flex items-center space-x-3">
           <div className="flex items-center px-2 py-1 bg-green-900/30 border border-green-800 rounded text-xs text-green-400 font-medium">
             <CheckCircle className="w-3 h-3 mr-1.5" />
-            Backend Active
+            Active
           </div>
           <button onClick={resetConfig} title="Reset Connection" className="text-slate-500 hover:text-slate-300">
             <RefreshCw className="w-3 h-3" />
@@ -187,7 +177,6 @@ export const ExtractorBuilder: React.FC<ExtractorBuilderProps> = ({ onBuild, isB
       </div>
       
       <form onSubmit={handleRunExtraction} className="p-6 space-y-6">
-        {/* Date Range Only - Keys are hidden */}
         <div className="space-y-4">
           <label className="text-xs font-bold text-slate-500 uppercase tracking-wider block">Target Date Range</label>
           <div className="grid grid-cols-2 gap-4">
@@ -227,11 +216,11 @@ export const ExtractorBuilder: React.FC<ExtractorBuilderProps> = ({ onBuild, isB
             {isBuilding ? (
               <>
                 <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                Fetching Data...
+                Fetching Transcripts...
               </>
             ) : (
               <>
-                Fetch Transcripts
+                Fetch Data
                 <ArrowRight className="w-4 h-4 ml-2" />
               </>
             )}
